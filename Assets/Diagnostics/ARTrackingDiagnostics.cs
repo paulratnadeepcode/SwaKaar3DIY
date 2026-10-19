@@ -39,7 +39,7 @@ namespace SwaKaar3DIY.Diagnostics
             rect.anchorMin = new Vector2(0, 1);
             rect.anchorMax = Vector2.one;
             rect.pivot = new Vector2(0.5f, 1);
-            rect.anchoredPosition = new Vector2(0, -12);
+            rect.anchoredPosition = new Vector2(0, -128);
             rect.sizeDelta = new Vector2(-24, 200);
             var image = panel.GetComponent<UnityEngine.UI.Image>();
             image.color = new Color(0, 0, 0, 0.58f);
