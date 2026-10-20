@@ -935,6 +935,8 @@ GameObject:
   m_Component:
   - component: {fileID: 152031551}
   - component: {fileID: 152031550}
+  - component: {fileID: 152031552}
+  - component: {fileID: 152031553}
   m_Layer: 0
   m_Name: ARDiagnostics
   m_TagString: Untagged
@@ -973,6 +975,39 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &152031552
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 152031549}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 64cbcc36d0a64974837044ec6e2092c2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SwaKaar3DIY.Diagnostics.ARCameraCapabilityDiagnostics
+  session: {fileID: 61504736}
+  cameraManager: {fileID: 714782838}
+  arCamera: {fileID: 714782840}
+--- !u!114 &152031553
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 152031549}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ca640b994ba448ef9aff36c580978e33, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SwaKaar3DIY.Capture.ARCameraCleanImageCapture
+  session: {fileID: 61504736}
+  cameraManager: {fileID: 714782838}
+  arCamera: {fileID: 714782840}
+  copyShader: {fileID: 4800000, guid: 62cf6b9f63c34af69922154959e3396a, type: 3}
+  font: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
+  navigation: {fileID: 548102204}
 --- !u!114 &215969770
 MonoBehaviour:
   m_ObjectHideFlags: 0
