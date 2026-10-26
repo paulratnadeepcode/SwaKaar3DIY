@@ -937,6 +937,8 @@ GameObject:
   - component: {fileID: 152031550}
   - component: {fileID: 152031552}
   - component: {fileID: 152031553}
+  - component: {fileID: 152031554}
+  - component: {fileID: 152031555}
   m_Layer: 0
   m_Name: ARDiagnostics
   m_TagString: Untagged
@@ -1008,6 +1010,36 @@ MonoBehaviour:
   copyShader: {fileID: 4800000, guid: 62cf6b9f63c34af69922154959e3396a, type: 3}
   font: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   navigation: {fileID: 548102204}
+--- !u!114 &152031554
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 152031549}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f0263c384cbd481ab93f5fa5447bd6b9, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::SwaKaar3DIY.Capture.NativeTextureSharingSmokeTest
+  session: {fileID: 61504736}
+  cameraManager: {fileID: 714782838}
+  arCamera: {fileID: 714782840}
+  font: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
+  navigation: {fileID: 548102204}
+--- !u!114 &152031555
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 152031549}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8b37316fa8cf4bdf9545398ab9c4e810, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::SwaKaar3DIY.Capture.SyntheticEncoderExperiment
+  patternShader: {fileID: 4800000, guid: a7cdf609b8d74f54b959fe21c3270613, type: 3}
 --- !u!114 &215969770
 MonoBehaviour:
   m_ObjectHideFlags: 0
