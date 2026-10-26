@@ -38,7 +38,9 @@ struct Job {
     bool pass=false,clean=true;
     std::atomic<bool> failed{false};
     std::mutex failureMutex,traceMutex;
-    bool recording=false;
+    bool recording=false, realCamera=false;
+    int frameLimit=150, reservedFrames=0;
+    int64_t lastReservedPts=-1;
     std::atomic<int> ready{0}, ended{0}, outstanding{0}, producerError{0};
     std::atomic<int> submitted{0}, swapped{0}, samples{0}, queueHigh{0};
     std::atomic<int> drainStop{0}, drainDone{0}, eos{0};
@@ -49,8 +51,8 @@ struct Job {
     AMediaMuxer* muxer=nullptr;
     bool muxerStarted=false,finalized=false;
     int outputFd=-1,formatChanges=0,configBuffers=0,keySamples=0;
-    int64_t firstPts=-1,lastPts=-1,samplePts[150]={},inputPts[150]={};
-    int sampleBytes[150]={},sampleFlags[150]={};
+    int64_t firstPts=-1,lastPts=-1,samplePts[320]={},inputPts[320]={};
+    int sampleBytes[320]={},sampleFlags[320]={};
     double elapsedMs=0,maxSwapMs=0,producerWaitMs=0,consumerWaitMs=0,maxDrainMs=0;
     int producerTimeouts=0,consumerTimeouts=0;
     PFNEGLPRESENTATIONTIMEANDROIDPROC presentation=nullptr;
@@ -263,7 +265,7 @@ static void* Drain(void* ptr) {
             int sample=j->samples.load();
             if(!bytes || info.offset<0 || size_t(info.offset)>capacity ||
                 size_t(info.size)>capacity-size_t(info.offset) || !j->muxerStarted ||
-                sample>=150 || info.presentationTimeUs<0 ||
+                sample>=j->frameLimit || info.presentationTimeUs<0 ||
                 (sample>0 && info.presentationTimeUs<=j->lastPts) ||
                 (info.flags&AMEDIACODEC_BUFFER_FLAG_PARTIAL_FRAME)) {
                 Fail(j,"Invalid/nonmonotonic/partial encoded output or missing format");
@@ -619,19 +621,20 @@ EW_EXPORT const char* EW1_Report(void* p) {
     if(j->recording) {
         std::snprintf(j->report,sizeof(j->report),
             "schema=2 pass=%d cleanup=%d cancelled=%d finalized=%d requested=%s actual=%s firstFailure=%s Media=%d EGL=0x%x "
-            "submitted=%d swapped=%d encodedSamples=%d target=150 expectedDecodedFrames=%d decodedFrames=UNVERIFIED "
+            "submitted=%d swapped=%d encodedSamples=%d target=%d cameraMode=%d capacity=%d expectedDecodedFrames=%d decodedFrames=UNVERIFIED "
             "EOS=%d formatChanges=%d codecConfigBuffers=%d keySamples=%d queueHigh=%d "
             "elapsedMs=%.3f maxSwapMs=%.3f producerWaitTotalMs=%.3f consumerWaitTotalMs=%.3f "
             "producerTimeouts=%d consumerTimeouts=%d maxDrainCallMs=%.3f producerCallbackMaxMs=%.3f initCallbackMs=%.3f "
             "callerTid=%ld callbackTid=%ld workerTid=%ld firstPtsUs=%lld lastPtsUs=%lld "
             "path=%s; trace={%s} cleanupTrace={%s}; samples=[",
             int(j->pass),int(j->clean),j->cancel.load(),int(j->finalized),j->requested,j->actual,j->failure,
-            j->mediaError,j->eglError,j->submitted.load(),j->swapped.load(),j->samples.load(),j->samples.load(),
+            j->mediaError,j->eglError,j->submitted.load(),j->swapped.load(),j->samples.load(),
+            j->realCamera?0:150,int(j->realCamera),j->frameLimit,j->samples.load(),
             j->eos.load(),j->formatChanges,j->configBuffers,j->keySamples,j->queueHigh.load(),
             j->elapsedMs,j->maxSwapMs,j->producerWaitMs,j->consumerWaitMs,j->producerTimeouts,j->consumerTimeouts,
             j->maxDrainMs,double(j->callbackMaxNs.load())/1e6,j->callbackMs,j->callerTid,j->callbackTid,j->workerTid,
             static_cast<long long>(j->firstPts),static_cast<long long>(j->lastPts),j->path,j->trace,j->cleanup);
-        for(int i=0;i<j->samples.load() && i<150;++i)
+        for(int i=0;i<j->samples.load() && i<j->frameLimit;++i)
             EncoderWindow::Append(j->report,sizeof(j->report),"%s%lld:%d:0x%x",i?",":"",
                 static_cast<long long>(j->samplePts[i]),j->sampleBytes[i],j->sampleFlags[i]);
         EncoderWindow::Append(j->report,sizeof(j->report),"]; sampleTuple=ptsUs:bytes:flags; decoded count needs external decoder");
@@ -654,13 +657,24 @@ EW_EXPORT void* EW2_Create(const char* requested,const char* canonical,const cha
     j->slots[0].texture=GLuint(a); j->slots[1].texture=GLuint(b); j->slots[2].texture=GLuint(c);
     return j;
 }
+// Camera mode keeps the verified synthetic exports and fixed synthetic timestamp contract intact.
+EW_EXPORT void* EW3_Create(const char* requested,const char* canonical,const char* path,
+                           uintptr_t a,uintptr_t b,uintptr_t c) {
+    auto* j=static_cast<EncoderWindow::Job*>(EW2_Create(requested,canonical,path,a,b,c));
+    if(j) { j->realCamera=true; j->frameLimit=320; }
+    return j;
+}
 EW_EXPORT int EW2_Ready(void* ptr) {
     return static_cast<EncoderWindow::Job*>(ptr)->ready.load(std::memory_order_acquire);
 }
 EW_EXPORT int EW2_Reserve(void* ptr,int frame,int64_t pts) {
     auto* j=static_cast<EncoderWindow::Job*>(ptr);
-    if(frame<0 || frame>=150 || pts!=int64_t(frame)*1000000000LL/30 ||
-       j->ready.load()!=1 || j->cancel.load() || j->ended.load()) return -1;
+    bool invalid=j->realCamera
+        ? (frame!=j->reservedFrames || frame<0 || frame>=j->frameLimit || pts<0 ||
+           pts>=10000000000LL || (frame==0 && pts!=0) ||
+           (frame>0 && pts/1000<=j->lastReservedPts/1000))
+        : (frame<0 || frame>=150 || pts!=int64_t(frame)*1000000000LL/30);
+    if(invalid || j->ready.load()!=1 || j->cancel.load() || j->ended.load()) return -1;
     for(int i=0;i<3;++i) {
         int free=0;
         if(!j->slots[i].state.compare_exchange_strong(free,1)) continue;
@@ -670,6 +684,7 @@ EW_EXPORT int EW2_Reserve(void* ptr,int frame,int64_t pts) {
             j->outstanding.fetch_sub(1); return -1;
         }
         j->slots[i].frame=frame; j->slots[i].pts=pts;
+        if(j->realCamera) { ++j->reservedFrames; j->lastReservedPts=pts; }
         int occupancy=0;
         for(auto& s:j->slots) if(s.state.load()!=0) ++occupancy;
         int high=j->queueHigh.load();

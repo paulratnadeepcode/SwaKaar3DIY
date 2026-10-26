@@ -19,6 +19,9 @@ namespace SwaKaar3DIY.Capture
         const int BufferBytes = 64 * 1024;
         const long MaximumSourceBytes = 512L * 1024 * 1024;
         static ExistingSyntheticRecordingExport instance;
+        static string latestCameraBasename;
+        UnityEngine.UI.Button cameraExportButton, cameraJsonExportButton;
+        string cameraDescription = "";
         GameObject canvasObject;
         UnityEngine.UI.Button exportButton;
         UnityEngine.UI.Text information;
@@ -28,7 +31,14 @@ namespace SwaKaar3DIY.Capture
         bool paused;
         Work work;
 
-        [Serializable] public sealed class Frame { public int frame; public long ptsNs; }
+        [Serializable] public sealed class Frame { public int frame; public long ptsNs, cameraTimestampNs; }
+        [Serializable] public sealed class CameraMetadata {
+            public int schemaVersion, width, height, fps, sourceWidth, sourceHeight, requestedFrames, encodedFrames;
+            public bool nativePass, cancelled, finalized;
+            public string recordingKind, output, nativeReport;
+            public long firstCameraTimestampNs;
+            public Frame[] frames;
+        }
         [Serializable] public sealed class RecordingMetadata
         {
             public int schemaVersion, width, height, fps, targetFrames, requestedFrames;
@@ -52,7 +62,8 @@ namespace SwaKaar3DIY.Capture
         }
         sealed class Work
         {
-            public string root;
+            public string root, basename;
+            public bool cameraRecording, jsonSidecar;
             public volatile bool cancel, done;
             public ExportResult result;
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -86,6 +97,8 @@ namespace SwaKaar3DIY.Capture
             if (canvasObject != null) Destroy(canvasObject);
             canvasObject = null;
             exportButton = null;
+            cameraExportButton = null;
+            cameraJsonExportButton = null;
             information = null;
             navigation = null;
         }
@@ -127,9 +140,37 @@ namespace SwaKaar3DIY.Capture
             label.rectTransform.offsetMax = new Vector2(-8, -8);
             information = MakeText(safe.transform, "", 20);
             information.rectTransform.anchorMin = information.rectTransform.anchorMax = information.rectTransform.pivot = new Vector2(0.5f, 0);
-            information.rectTransform.anchoredPosition = new Vector2(0, 440);
+            information.rectTransform.anchoredPosition = new Vector2(0, 656);
             information.rectTransform.sizeDelta = new Vector2(960, 160);
+            var cameraControl = Instantiate(control, safe.transform);
+            cameraControl.name = "ExportLatestCameraMP4";
+            var cameraRect = cameraControl.GetComponent<RectTransform>();
+            cameraRect.anchoredPosition = new Vector2(-140, 552);
+            cameraRect.sizeDelta = new Vector2(240, 88);
+            cameraExportButton = cameraControl.GetComponent<UnityEngine.UI.Button>();
+            cameraExportButton.onClick.RemoveAllListeners();
+            cameraExportButton.onClick.AddListener(() => BeginExport(true));
+            var cameraLabel = cameraControl.GetComponentInChildren<UnityEngine.UI.Text>();
+            cameraLabel.fontSize = 22;
+            cameraLabel.text = "Save camera MP4";
+            var jsonControl = Instantiate(cameraControl, safe.transform);
+            jsonControl.name = "ExportCameraJSON";
+            jsonControl.GetComponent<RectTransform>().anchoredPosition = new Vector2(140, 552);
+            cameraJsonExportButton = jsonControl.GetComponent<UnityEngine.UI.Button>();
+            cameraJsonExportButton.onClick.RemoveAllListeners();
+            cameraJsonExportButton.onClick.AddListener(() => BeginExport(true, true));
+            jsonControl.GetComponentInChildren<UnityEngine.UI.Text>().text = "Save camera JSON";
             RefreshSelection();
+        }
+        public static void OfferCameraRecording(string output)
+        {
+            if (!Debug.isDebugBuild || Application.platform != RuntimePlatform.Android) return;
+            string root = Path.Combine(Application.persistentDataPath, "SyntheticEncoderCheckpoint");
+            string stem = Path.GetFileNameWithoutExtension(output);
+            if (Path.GetFullPath(output) != SafePath(root, ".mp4", stem)) throw new IOException("Unexpected camera recording path.");
+            ValidateMetadata(root, stem, true);
+            latestCameraBasename = stem; // Explicit successful completion; no directory scan or automatic export.
+            if(instance!=null) instance.RefreshSelection();
         }
         static UnityEngine.UI.Text MakeText(Transform parent, string text, int size)
         {
@@ -155,23 +196,31 @@ namespace SwaKaar3DIY.Capture
                 selectedDescription = Basename + ".mp4\nSource: " + file.Length.ToString(CultureInfo.InvariantCulture) + " bytes";
             }
             catch (Exception ex) { selectedDescription = Basename + ".mp4\nUnavailable: " + ex.Message; }
+            cameraDescription = "";
+            if (latestCameraBasename != null) {
+                try { cameraDescription = "\nCamera: " + latestCameraBasename + ".mp4\nSource: " +
+                    new FileInfo(SafePath(rootPath,".mp4",latestCameraBasename)).Length + " bytes"; }
+                catch(Exception ex) { cameraDescription = "\nCamera recording unavailable: " + ex.Message; }
+            }
         }
-        void RequestExport()
+        void RequestExport() { BeginExport(false); }
+        void BeginExport(bool cameraRecording, bool jsonSidecar = false)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            if (!Debug.isDebugBuild || paused || work != null || navigation == null || navigation.IsBlockingNavigation) return;
+            if (!Debug.isDebugBuild || paused || work != null || SyntheticEncoderExperiment.IsRecording || navigation == null || navigation.IsBlockingNavigation) return;
             AndroidJavaObject context = null;
             try
             {
                 using (var version = new AndroidJavaClass("android.os.Build$VERSION"))
                     if (version.GetStatic<int>("SDK_INT") < 29) throw new NotSupportedException("MediaStore Downloads requires Android API 29+.");
-                // Selection is fixed. Validate it before creating any destination or worker.
-                ValidateMetadata(rootPath);
-                SafePath(rootPath, ".mp4");
+                string selected = cameraRecording ? latestCameraBasename : Basename;
+                if (selected == null) throw new IOException("No successfully finalized camera recording selected.");
+                ValidateMetadata(rootPath, selected, cameraRecording);
+                SafePath(rootPath, ".mp4", selected);
                 using (var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
                 using (var activity = player.GetStatic<AndroidJavaObject>("currentActivity"))
                     context = activity.Call<AndroidJavaObject>("getApplicationContext");
-                var pending = new Work { root = rootPath, context = context };
+                var pending = new Work { root = rootPath, basename = selected, cameraRecording = cameraRecording, jsonSidecar = jsonSidecar, context = context };
                 var thread = new Thread(() => Run(pending)) { IsBackground = true, Name = "ExistingMP4Export" };
                 work = pending;
                 try { thread.Start(); }
@@ -209,8 +258,11 @@ namespace SwaKaar3DIY.Capture
                 RefreshSelection();
             }
             if (exportButton != null) exportButton.interactable = Debug.isDebugBuild && !paused && work == null &&
-                navigation != null && !navigation.IsBlockingNavigation;
-            if (information != null) information.text = selectedDescription + "\n" + status;
+                navigation != null && !navigation.IsBlockingNavigation && !SyntheticEncoderExperiment.IsRecording;
+            if (cameraExportButton != null) cameraExportButton.interactable = exportButton != null &&
+                exportButton.interactable && latestCameraBasename != null;
+            if (cameraJsonExportButton != null) cameraJsonExportButton.interactable = cameraExportButton != null && cameraExportButton.interactable;
+            if (information != null) information.text = selectedDescription + cameraDescription + "\n" + status;
         }
         void CancelExport() { if (work != null) work.cancel = true; }
         void OnApplicationPause(bool value) { paused = value; if (value) CancelExport(); }
@@ -223,12 +275,15 @@ namespace SwaKaar3DIY.Capture
             if (instance == this) instance = null;
         }
 
-        static string SafePath(string root, string extension)
+        static string SafePath(string root, string extension, string basename = null)
         {
+            basename = basename ?? Basename;
+            if (basename != Basename && !Regex.IsMatch(basename, "^camera-[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{32}$"))
+                throw new IOException("Unsafe camera basename.");
             if (string.IsNullOrEmpty(root) || (extension != ".mp4" && extension != ".json")) throw new IOException("Unsafe source selection.");
             string folder = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string file = Path.GetFullPath(Path.Combine(folder, Basename + extension));
-            if (Path.GetDirectoryName(file) != folder || Path.GetFileName(file) != Basename + extension ||
+            string file = Path.GetFullPath(Path.Combine(folder, basename + extension));
+            if (Path.GetDirectoryName(file) != folder || Path.GetFileName(file) != basename + extension ||
                 file.EndsWith(".partial", StringComparison.Ordinal)) throw new IOException("Unsafe source path.");
             var info = new FileInfo(file);
             long limit = extension == ".json" ? 1024 * 1024 : MaximumSourceBytes;
@@ -236,8 +291,10 @@ namespace SwaKaar3DIY.Capture
                 throw new IOException("Source missing, empty, linked or oversized.");
             return file;
         }
-        static void ValidateMetadata(string root)
+        static void ValidateMetadata(string root, string basename = null, bool cameraRecording = false)
         {
+            if (cameraRecording) { ValidateCameraMetadata(root, basename); return; }
+            if (basename != null && basename != Basename) throw new IOException("Historical recording selection changed.");
             string mp4 = SafePath(root, ".mp4"), json = SafePath(root, ".json");
             var report = JsonUtility.FromJson<RecordingMetadata>(File.ReadAllText(json));
             if (report == null || report.schemaVersion != 2 || !report.nativePass || report.cancelled ||
@@ -254,6 +311,32 @@ namespace SwaKaar3DIY.Capture
             foreach (string key in new[] { "cancelled" }) RequireToken(summary, key, "0");
             foreach (string key in new[] { "submitted", "swapped", "encodedSamples" }) RequireToken(summary, key, "150");
             RequireToken(summary, "firstFailure", "none");
+        }
+        static void ValidateCameraMetadata(string root, string basename)
+        {
+            if (basename == null || basename == Basename) throw new InvalidDataException("Camera selection missing.");
+            string mp4=SafePath(root,".mp4",basename), json=SafePath(root,".json",basename);
+            var r=JsonUtility.FromJson<CameraMetadata>(File.ReadAllText(json));
+            if(r==null || r.schemaVersion!=3 || r.recordingKind!="ar-camera" || !r.nativePass || r.cancelled || !r.finalized ||
+                r.width!=1920 || r.height!=1080 || r.sourceWidth!=1920 || r.sourceHeight!=1080 || r.fps!=30 ||
+                r.requestedFrames<=0 || r.requestedFrames>320 || r.encodedFrames!=r.requestedFrames ||
+                r.frames==null || r.frames.Length!=r.requestedFrames || r.firstCameraTimestampNs<0 ||
+                string.IsNullOrEmpty(r.output) || Path.GetFullPath(r.output)!=mp4)
+                throw new InvalidDataException("Camera sidecar is not a finalized successful schema 3 recording.");
+            long previous=-1;
+            for(int i=0;i<r.frames.Length;i++) {
+                var f=r.frames[i];
+                if(f==null || f.frame!=i || f.cameraTimestampNs<r.firstCameraTimestampNs ||
+                    f.ptsNs!=f.cameraTimestampNs-r.firstCameraTimestampNs || f.ptsNs<0 || f.ptsNs>=10000000000L ||
+                    (i==0 && f.ptsNs!=0) || (i>0 && f.ptsNs/1000<=previous/1000))
+                    throw new InvalidDataException("Camera frame sequence/timestamps invalid.");
+                previous=f.ptsNs;
+            }
+            string summary=(r.nativeReport??"").Split(new[] {"; trace="},StringSplitOptions.None)[0];
+            foreach(string key in new[] {"pass","cleanup","finalized","EOS","cameraMode"}) RequireToken(summary,key,"1");
+            RequireToken(summary,"cancelled","0");
+            foreach(string key in new[] {"submitted","swapped","encodedSamples"}) RequireToken(summary,key,r.requestedFrames.ToString(CultureInfo.InvariantCulture));
+            RequireToken(summary,"firstFailure","none");
         }
         static void RequireToken(string summary, string key, string expected)
         {
@@ -490,10 +573,14 @@ namespace SwaKaar3DIY.Capture
                 attached = true; // This is a new dedicated managed thread, not a reused JVM/pool thread.
                 Check(work, timer);
                 string folder = Canonical(work.root);
-                string source = SafePath(work.root, ".mp4"), json = SafePath(work.root, ".json");
-                if (Canonical(source) != folder + "/" + Basename + ".mp4" || Canonical(json) != folder + "/" + Basename + ".json")
+                string selected = work.basename ?? Basename;
+                string mp4 = SafePath(work.root, ".mp4", selected), json = SafePath(work.root, ".json", selected);
+                if (work.jsonSidecar && !work.cameraRecording) throw new IOException("Historical JSON export is not selected.");
+                string extension = work.jsonSidecar ? ".json" : ".mp4";
+                string source = work.jsonSidecar ? json : mp4;
+                if (Canonical(mp4) != folder + "/" + selected + ".mp4" || Canonical(json) != folder + "/" + selected + ".json")
                     throw new IOException("Canonical source escaped its fixed recording directory.");
-                ValidateMetadata(work.root);
+                ValidateMetadata(work.root, selected, work.cameraRecording);
                 result.source = source;
                 var sourceInfo = new FileInfo(source);
                 long expected = sourceInfo.Length;
@@ -505,14 +592,14 @@ namespace SwaKaar3DIY.Capture
                 result.ownerPackage = work.context.Call<string>("getPackageName");
                 if (result.ownerPackage != "com.swakaar3diy.app") throw new IOException("Unexpected application package.");
                 resolver = work.context.Call<AndroidJavaObject>("getContentResolver");
-                string name = Basename + "-export-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture) +
-                    "-" + Guid.NewGuid().ToString("N") + ".mp4";
+                string name = selected + "-export-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture) +
+                    "-" + Guid.NewGuid().ToString("N") + extension;
                 using (var downloads = new AndroidJavaClass("android.provider.MediaStore$Downloads"))
                 using (var collection = downloads.CallStatic<AndroidJavaObject>("getContentUri", "external_primary"))
                 using (var values = new AndroidJavaObject("android.content.ContentValues"))
                 {
                     values.Call("put", "_display_name", name);
-                    values.Call("put", "mime_type", "video/mp4");
+                    values.Call("put", "mime_type", work.jsonSidecar ? "application/json" : "video/mp4");
                     values.Call("put", "relative_path", "Download/SwaKaar3DIY/");
                     PutPending(values, 1);
                     uri = resolver.Call<AndroidJavaObject>("insert", collection, values);

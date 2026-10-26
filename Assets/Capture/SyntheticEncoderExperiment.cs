@@ -17,6 +17,35 @@ namespace SwaKaar3DIY.Capture
         static SyntheticEncoderExperiment active;
         static string result = "Record synthetic 5 seconds";
         [SerializeField] Shader patternShader;
+        [SerializeField] Shader cameraCopyShader;
+        static string cameraResult = "Start Recording";
+        public static bool IsRecording => active != null;
+        bool realCamera, cameraSubscribed;
+        Texture cameraTexture;
+        int cameraUnityFrame = -1, sourceWidth, sourceHeight, skippedCameraFrames;
+        long candidateTimestamp = -1, observedTimestamp = -1, firstCameraTimestamp = -1, lastSubmittedTimestamp = -1;
+        double lastCameraFrameRealtime;
+        UnityEngine.UI.Button cameraButton;
+        UnityEngine.UI.Text cameraLabel;
+        readonly List<CameraTrackingRecord> cameraTracking = new List<CameraTrackingRecord>(240);
+        [Serializable] public sealed class CameraTrackingRecord {
+            public double realtime;
+            public string phase, session, camera, reason;
+            public bool tracking;
+        }
+        [Serializable] public sealed class CameraRecordingReport {
+            public int schemaVersion=3, width=1920, height=1080, fps=30, sourceWidth, sourceHeight;
+            public string recordingKind="ar-camera", utc, output, nativeReport, cancellationReason, screenOrientation;
+            public bool nativePass, cancelled, finalized;
+            public int requestedFrames, encodedFrames, skippedFrames;
+            public double recordingWallClockSeconds, cameraTimelineSeconds;
+            public long firstCameraTimestampNs;
+            public string uvPolicy="sourceUV=(u,1-v), full source coverage, native identity sampling; no display transform";
+            public string colorPolicy="External OES RGB -> non-sRGB RGBA8 UNorm -> hardware H264 RGB/YUV conversion";
+            public string timingPolicy="AR camera frame callback timestamp matched to latest frame and same Unity render frame; exposure association and video orientation require device validation";
+            public List<FrameRecord> frames;
+            public List<CameraTrackingRecord> trackingSamples;
+        }
         RenderTexture[] textures;
         Material pattern;
         string outputBase;
@@ -27,7 +56,7 @@ namespace SwaKaar3DIY.Capture
         readonly List<TrackingRecord> tracking = new List<TrackingRecord>(240);
         [Serializable] public sealed class FrameRecord {
             public int frame, textureSlot, unityFrame;
-            public long ptsNs;
+            public long ptsNs, cameraTimestampNs;
             public double submittedRealtime;
         }
         [Serializable] public sealed class TrackingRecord {
@@ -72,6 +101,10 @@ namespace SwaKaar3DIY.Capture
         [DllImport("__Internal", CallingConvention = CallingConvention.Cdecl)] static extern void EW1_Cancel(IntPtr p);
         [DllImport("__Internal", CallingConvention = CallingConvention.Cdecl)] static extern void EW1_Destroy(IntPtr p);
         [DllImport("__Internal", CallingConvention = CallingConvention.Cdecl)] static extern IntPtr EW2_Create(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string requested,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string canonical,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string partialPath, UIntPtr a, UIntPtr b, UIntPtr c);
+        [DllImport("__Internal", CallingConvention = CallingConvention.Cdecl)] static extern IntPtr EW3_Create(
             [MarshalAs(UnmanagedType.LPUTF8Str)] string requested,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string canonical,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string partialPath, UIntPtr a, UIntPtr b, UIntPtr c);
@@ -152,6 +185,28 @@ namespace SwaKaar3DIY.Capture
             label.alignment = TextAnchor.MiddleCenter;
             label.color = Color.white;
             label.raycastTarget = false;
+            // Camera Start/Stop occupies its own centered safe-area row.
+            var cameraControl = Instantiate(control, safe.transform);
+            cameraControl.name = "CameraStartStop";
+            var cameraRect = cameraControl.GetComponent<RectTransform>();
+            cameraRect.anchoredPosition = new Vector2(0, 448);
+            cameraRect.sizeDelta = new Vector2(520, 88);
+            cameraButton = cameraControl.GetComponent<UnityEngine.UI.Button>();
+            cameraButton.onClick.RemoveAllListeners();
+            cameraButton.onClick.AddListener(ToggleCameraRecording);
+            cameraLabel = cameraControl.GetComponentInChildren<UnityEngine.UI.Text>();
+            cameraLabel.fontSize = 22;
+            cameraLabel.text = "Start Recording";
+        }
+        void ToggleCameraRecording()
+        {
+            if (active != null)
+            {
+                if (active.realCamera && !active.productionEnded && navigation != null && !navigation.IsBlockingNavigation)
+                    active.EndProduction();
+                return;
+            }
+            StartExperiment(true);
         }
         bool Tracking()
         {
@@ -198,13 +253,14 @@ namespace SwaKaar3DIY.Capture
             throw new InvalidOperationException("Selected codec metadata no longer available");
         }
 #endif
-        public void RequestSetup()
+        public void RequestSetup() { StartExperiment(false); }
+        void StartExperiment(bool cameraMode)
         {
             if (!Application.isPlaying || (!Application.isEditor && !Debug.isDebugBuild) ||
                 active != null || paused || navigation == null || navigation.IsBlockingNavigation) return;
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.OpenGLES3) { result = "Requires OpenGL ES3"; return; }
-            if (!Tracking()) { result = "Wait for camera Tracking"; return; }
+            if (!Tracking()) { if(cameraMode) cameraResult="Wait for camera Tracking"; else result="Wait for camera Tracking"; return; }
             IntPtr pendingJob = IntPtr.Zero;
             RenderTexture[] pendingTextures = null;
             Material pendingPattern = null;
@@ -222,12 +278,13 @@ namespace SwaKaar3DIY.Capture
                     (eligible.Count > 0 ? eligible[0] : null);
                 if (selected == null) throw new InvalidOperationException("No advertised hardware AVC surface encoder supports 1080p30");
                 string canonical = CanonicalName(selected.name);
-                Debug.Log("[EncoderWindow] Starting synthetic recording POC; hardware flags are advertised, recording performance is unverified.");
+                Debug.Log("[EncoderWindow] Starting " + (cameraMode ? "real camera" : "synthetic") + " recording POC; current device performance remains unverified.");
                 if (EW1_Abi() != 1) throw new InvalidOperationException("Native ABI mismatch");
                 var cb = EW1_Callback();
                 if (cb == IntPtr.Zero) throw new InvalidOperationException("Native callback export missing");
-                if (patternShader == null || !patternShader.isSupported)
-                    throw new InvalidOperationException("Serialized synthetic shader missing or unsupported");
+                var copy = cameraMode ? cameraCopyShader : patternShader;
+                if (copy == null || !copy.isSupported)
+                    throw new InvalidOperationException("Serialized recording shader missing or unsupported");
                 if (!SystemInfo.IsFormatSupported(GraphicsFormat.R8G8B8A8_UNorm, GraphicsFormatUsage.Render))
                     throw new InvalidOperationException("RGBA8 render target unavailable");
                 string directory = Path.Combine(Application.persistentDataPath, "SyntheticEncoderCheckpoint");
@@ -235,7 +292,7 @@ namespace SwaKaar3DIY.Capture
                 using (var os = new AndroidJavaObject("android.os.StatFs", directory))
                     if (os.Call<long>("getAvailableBytes") < 128L*1024*1024)
                         throw new IOException("At least 128 MiB free storage required");
-                string basename = Path.Combine(directory, "synthetic-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") +
+                string basename = Path.Combine(directory, (cameraMode ? "camera-" : "synthetic-") + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") +
                     "-" + Guid.NewGuid().ToString("N"));
                 pendingTextures = new RenderTexture[3];
                 var native = new UIntPtr[3];
@@ -248,18 +305,22 @@ namespace SwaKaar3DIY.Capture
                         name="SyntheticEncoderSlot"+i, filterMode=FilterMode.Point,
                         wrapMode=TextureWrapMode.Clamp
                     };
-                    if (!texture.Create()) throw new InvalidOperationException("RGBA8 texture allocation failed");
+                    if (!texture.Create() || texture.graphicsFormat != GraphicsFormat.R8G8B8A8_UNorm || texture.sRGB)
+                        throw new InvalidOperationException("Exact non-sRGB RGBA8 texture allocation failed");
                     // Exactly one native-handle query per allocated texture.
                     long handle=texture.GetNativeTexturePtr().ToInt64();
                     if (handle<=0 || handle>uint.MaxValue) throw new InvalidOperationException("Invalid GLES texture name");
                     native[i]=new UIntPtr((ulong)handle);
                 }
-                pendingPattern = new Material(patternShader) { hideFlags=HideFlags.HideAndDontSave };
-                pendingJob = EW2_Create(selected.name, canonical, basename+".mp4.partial", native[0],native[1],native[2]);
+                pendingPattern = new Material(copy) { hideFlags=HideFlags.HideAndDontSave };
+                pendingJob = cameraMode
+                    ? EW3_Create(selected.name, canonical, basename+".mp4.partial", native[0],native[1],native[2])
+                    : EW2_Create(selected.name, canonical, basename+".mp4.partial", native[0],native[1],native[2]);
                 if (pendingJob == IntPtr.Zero) throw new InvalidOperationException("Native setup job allocation failed");
                 var go = pendingOwner = new GameObject("EncoderWindowResourceOwner");
                 runner = go.AddComponent<SyntheticEncoderExperiment>();
                 runner.owner = true;
+                runner.realCamera = cameraMode;
                 runner.textures=pendingTextures; pendingTextures=null;
                 runner.pattern=pendingPattern; pendingPattern=null;
                 runner.outputBase=basename;
@@ -270,8 +331,14 @@ namespace SwaKaar3DIY.Capture
                 active = runner;
                 RenderPipelineManager.beginCameraRendering += runner.Render;
                 runner.subscribed = true;
+                if (cameraMode) {
+                    cameraManager.frameReceived += runner.OnCameraFrame;
+                    runner.cameraSubscribed = true;
+                    runner.lastCameraFrameRealtime = Time.realtimeSinceStartupAsDouble;
+                    cameraResult = "Stop Recording";
+                }
                 runner.SampleTracking("before");
-                result = "Recording synthetic pattern...";
+                if (!cameraMode) result = "Recording synthetic pattern...";
             }
             catch (Exception ex)
             {
@@ -290,7 +357,7 @@ namespace SwaKaar3DIY.Capture
                 }
                 else if (pendingOwner != null) Destroy(pendingOwner);
                 Debug.LogWarning("[EncoderWindow] " + ex, this);
-                result = "Encoder setup unavailable";
+                if(cameraMode) cameraResult="Camera setup unavailable"; else result="Encoder setup unavailable";
             }
 #else
             result = "Android device required";
@@ -298,11 +365,68 @@ namespace SwaKaar3DIY.Capture
 #endif
         }
 
+        void OnCameraFrame(ARCameraFrameEventArgs args)
+        {
+            if (!realCamera || cancelled || productionEnded || !args.timestampNs.HasValue) return;
+            long timestamp = args.timestampNs.Value;
+            if (timestamp <= observedTimestamp) return;
+            if (cameraTexture != null) ++skippedCameraFrames;
+            cameraTexture = null;
+            observedTimestamp = timestamp;
+            lastCameraFrameRealtime = Time.realtimeSinceStartupAsDouble;
+            if (args.textures == null || args.propertyNameIds == null) { ++skippedCameraFrames; return; }
+            int main = Shader.PropertyToID("_MainTex");
+            for (int i=0;i<Math.Min(args.textures.Count,args.propertyNameIds.Count);i++)
+                if (args.propertyNameIds[i] == main) { cameraTexture = args.textures[i]; break; }
+            if (cameraTexture == null) { ++skippedCameraFrames; return; }
+            sourceWidth = cameraTexture.width; sourceHeight = cameraTexture.height;
+            if (sourceWidth != 1920 || sourceHeight != 1080) { Cancel("Camera source is not 1920x1080; no upscaling"); cameraTexture=null; return; }
+            candidateTimestamp = timestamp;
+            cameraUnityFrame = Time.frameCount;
+        }
+        bool CameraFrameMatches()
+        {
+            if (cameraManager == null || cameraManager.subsystem == null || !cameraManager.subsystem.running || arCamera == null) return false;
+            var p = new XRCameraParams { zNear=arCamera.nearClipPlane,zFar=arCamera.farClipPlane,
+                screenWidth=Screen.width,screenHeight=Screen.height,screenOrientation=Screen.orientation };
+            return cameraManager.subsystem.TryGetLatestFrame(p,out var frame) &&
+                frame.TryGetTimestamp(out long timestamp) && timestamp == candidateTimestamp;
+        }
+        void RenderCamera(ScriptableRenderContext context)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            double now=Time.realtimeSinceStartupAsDouble;
+            if (recordingStart<0) recordingStart=now;
+            if (now-recordingStart>=10 || requested>=320) { EndProduction(); return; }
+            if (cameraTexture==null) return;
+            var source=cameraTexture;
+            cameraTexture=null; // Never retain transient source texture for asynchronous native work.
+            if (cameraUnityFrame!=Time.frameCount || candidateTimestamp<=lastSubmittedTimestamp || !CameraFrameMatches()) {
+                ++skippedCameraFrames; return;
+            }
+            long origin=firstCameraTimestamp<0 ? candidateTimestamp : firstCameraTimestamp;
+            long pts=candidateTimestamp-origin;
+            if (pts>=10000000000L) { EndProduction(); return; }
+            if (pts<0 || (requested>0 && pts/1000<=frames[frames.Count-1].ptsNs/1000)) { ++skippedCameraFrames; return; }
+            int slot=EW2_Reserve(job,requested,pts);
+            if (slot<0) { ++skippedCameraFrames; return; } // Drop incoming frame; never retry a transient texture.
+            using(var commands=new CommandBuffer {name="Clean AR camera GPU encoder producer"}) {
+                commands.Blit(source,textures[slot],pattern,0);
+                commands.IssuePluginEventAndData(callback,slot+2,job);
+                context.ExecuteCommandBuffer(commands);
+            }
+            firstCameraTimestamp=origin;
+            lastSubmittedTimestamp=candidateTimestamp;
+            frames.Add(new FrameRecord {frame=requested,textureSlot=slot,ptsNs=pts,cameraTimestampNs=candidateTimestamp,
+                unityFrame=Time.frameCount,submittedRealtime=now});
+            ++requested;
+#endif
+        }
         void Render(ScriptableRenderContext context, Camera camera)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (!owner || cancelled || camera != arCamera || job==IntPtr.Zero) return;
-            if (!Tracking()) { Cancel("Tracking lost at render submission"); return; }
+            if (!realCamera && !Tracking()) { Cancel("Tracking lost at render submission"); return; }
             try {
                 using (var commands = new CommandBuffer { name="Synthetic encoder GPU producer" }) {
                     if (!submitted) {
@@ -312,6 +436,7 @@ namespace SwaKaar3DIY.Capture
                         return;
                     }
                     if (productionEnded || EW2_Ready(job)!=1) return;
+                    if (realCamera) { RenderCamera(context); return; }
                     double now=Time.realtimeSinceStartupAsDouble;
                     if (recordingStart<0) recordingStart=now;
                     // Absolute deadlines never discard overdue IDs. At most one submission per callback.
@@ -356,7 +481,7 @@ namespace SwaKaar3DIY.Capture
         }
         void SampleTracking(string phase)
         {
-            if(tracking.Count>=240) return;
+            if((realCamera ? cameraTracking.Count : tracking.Count)>=240) return;
             string cameraState="Unavailable";
             try {
                 if(cameraManager!=null && cameraManager.subsystem!=null && arCamera!=null) {
@@ -365,6 +490,11 @@ namespace SwaKaar3DIY.Capture
                     if(cameraManager.subsystem.TryGetLatestFrame(p,out var frame)) cameraState=frame.trackingState.ToString();
                 }
             } catch(Exception) { }
+            if (realCamera) {
+                cameraTracking.Add(new CameraTrackingRecord {realtime=Time.realtimeSinceStartupAsDouble,phase=phase,
+                    session=ARSession.state.ToString(),camera=cameraState,reason=ARSession.notTrackingReason.ToString(),tracking=Tracking()});
+                return; // Camera mode intentionally records no poses.
+            }
             tracking.Add(new TrackingRecord {
                 realtime=Time.realtimeSinceStartupAsDouble,phase=phase,session=ARSession.state.ToString(),
                 camera=cameraState,reason=ARSession.notTrackingReason.ToString(),tracking=Tracking(),
@@ -381,16 +511,27 @@ namespace SwaKaar3DIY.Capture
                     button.interactable = active == null && !paused && navigation != null && !navigation.IsBlockingNavigation;
                     label.text = active != null ? (active.cancelled ? "Waiting for safe cleanup..." : "Recording/finalizing...") : result;
                 }
+                if (cameraButton != null) {
+                    cameraButton.interactable = !paused && navigation != null && !navigation.IsBlockingNavigation &&
+                        (active==null || (active.realCamera && !active.productionEnded && !active.cancelled));
+                    cameraLabel.text = active==null ? cameraResult : active.realCamera && !active.productionEnded
+                        ? "Stop Recording" : "Finalizing...";
+                }
                 return;
             }
 #if UNITY_ANDROID && !UNITY_EDITOR
+            if (realCamera && !productionEnded && recordingStart>=0) {
+                double now=Time.realtimeSinceStartupAsDouble;
+                if (now-recordingStart>=10) EndProduction();
+                else if (now-lastCameraFrameRealtime>2) Cancel("No fresh camera frames for two seconds");
+            }
             if (Time.realtimeSinceStartupAsDouble>=nextTrackingSample) {
                 SampleTracking(productionEnded?"finalizing":"during");
                 nextTrackingSample=Time.realtimeSinceStartupAsDouble+0.1;
             }
             if (!cancelled && (paused || navigation==null || navigation.IsBlockingNavigation))
                 Cancel("Pause, Home/Back dialog, or scene navigation");
-            if (!cancelled && !Tracking()) Cancel("Session or camera tracking lost");
+            if (!realCamera && !cancelled && !Tracking()) Cancel("Session or camera tracking lost");
             if (!cancelled && Time.realtimeSinceStartup>deadline) Cancel("Managed 30-second deadline");
             if (!submitted)
             {
@@ -417,10 +558,27 @@ namespace SwaKaar3DIY.Capture
                 colorPolicy="Synthetic raw RGB -> RGBA8 UNorm -> identity GLES copy; hardware RGB/YUV conversion; compressed colors need device validation",
                 frames=frames,trackingSamples=tracking
             };
+            bool metadataSaved=false;
+            bool cameraFinalized=pass && requested>0 && NativeCount(report,"encodedSamples")==requested &&
+                NativeCount(report,"finalized")==1 && File.Exists(outputBase+".mp4") && new FileInfo(outputBase+".mp4").Length>0;
+            var cameraReport = new CameraRecordingReport {
+                utc=sidecar.utc,output=sidecar.output,nativeReport=report,nativePass=pass,cancelled=cancelled,
+                finalized=cameraFinalized,cancellationReason=cancellationReason,requestedFrames=requested,
+                encodedFrames=NativeCount(report,"encodedSamples"),skippedFrames=skippedCameraFrames,
+                sourceWidth=sourceWidth,sourceHeight=sourceHeight,firstCameraTimestampNs=firstCameraTimestamp,
+                recordingWallClockSeconds=sidecar.recordingWallClockSeconds,
+                cameraTimelineSeconds=frames.Count==0 ? 0 : frames[frames.Count-1].ptsNs/1e9,
+                screenOrientation=Screen.orientation.ToString(),frames=frames,trackingSamples=cameraTracking
+            };
             try {
                 using(var writer=new StreamWriter(new FileStream(outputBase+".json",FileMode.CreateNew,FileAccess.Write)))
-                    writer.Write(JsonUtility.ToJson(sidecar,true));
+                    writer.Write(realCamera ? JsonUtility.ToJson(cameraReport,true) : JsonUtility.ToJson(sidecar,true));
+                metadataSaved=true;
             } catch(Exception ex) { Debug.LogWarning("[EncoderWindow] Metadata write failed: "+ex); }
+            if(realCamera && cameraFinalized && metadataSaved) {
+                try { ExistingSyntheticRecordingExport.OfferCameraRecording(outputBase+".mp4"); }
+                catch(Exception ex) { Debug.LogWarning("[EncoderWindow] Camera export selection unavailable: "+ex.Message); }
+            }
             Debug.Log("[EncoderWindow] END "+(pass?"MP4 FINALIZED":"FAILED/CANCELLED")+
                 "; requested="+requested+" queueRetries="+queueRetryAttempts+
                 " recordingWallSeconds="+sidecar.recordingWallClockSeconds.ToString("F6",System.Globalization.CultureInfo.InvariantCulture)+
@@ -428,9 +586,15 @@ namespace SwaKaar3DIY.Capture
                 " actualEncodedDuration=UNVERIFIED"+
                 "; output="+outputBase+".mp4; decoded frame count and playback UNVERIFIED");
             EW1_Destroy(job); job = IntPtr.Zero;
-            result = pass ? (requested==150 ? "Synthetic MP4 saved" : "MP4 saved (skipped frames)") : "Synthetic recording failed";
+            if(realCamera) cameraResult=cameraFinalized && metadataSaved ? "Camera MP4 saved" : "Camera recording failed";
+            else result = pass ? (requested==150 ? "Synthetic MP4 saved" : "MP4 saved (skipped frames)") : "Synthetic recording failed";
             Release();
 #endif
+        }
+        static int NativeCount(string report,string key)
+        {
+            var match=System.Text.RegularExpressions.Regex.Match(report,"(?:^|\\s)"+key+"=([0-9]+)(?:\\s|;|$)");
+            return match.Success && int.TryParse(match.Groups[1].Value,out int value) ? value : -1;
         }
         void Cancel(string reason="Component disabled or app paused")
         {
@@ -454,6 +618,8 @@ namespace SwaKaar3DIY.Capture
             if(pattern!=null) { Destroy(pattern); pattern=null; }
             if (subscribed) RenderPipelineManager.beginCameraRendering -= Render;
             subscribed = false;
+            if(cameraSubscribed && cameraManager!=null) cameraManager.frameReceived -= OnCameraFrame;
+            cameraSubscribed=false; cameraTexture=null;
             if (active == this) active = null;
             Destroy(gameObject);
         }

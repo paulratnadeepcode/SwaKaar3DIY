@@ -1040,6 +1040,7 @@ MonoBehaviour:
   m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::SwaKaar3DIY.Capture.SyntheticEncoderExperiment
   patternShader: {fileID: 4800000, guid: a7cdf609b8d74f54b959fe21c3270613, type: 3}
+  cameraCopyShader: {fileID: 4800000, guid: 62cf6b9f63c34af69922154959e3396a, type: 3}
 --- !u!114 &215969770
 MonoBehaviour:
   m_ObjectHideFlags: 0
