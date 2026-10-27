@@ -1755,6 +1755,8 @@ GameObject:
   m_Component:
   - component: {fileID: 991423205}
   - component: {fileID: 991423204}
+  - component: {fileID: 991423207}
+  - component: {fileID: 991423206}
   m_Layer: 0
   m_Name: XR Origin
   m_TagString: Untagged
@@ -1795,6 +1797,39 @@ Transform:
   - {fileID: 2147400342}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &991423206
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 991423203}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 66d2e653ed10c294d9af75b4c41210da, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::SwaKaar3DIY.GoogleEarthTracking.GoogleEarthTrackingController
+  imageManager: {fileID: 991423207}
+  indicatorPrefab: {fileID: 701819412223988846, guid: 2936e39b146266e458cd9512769bf9a4, type: 3}
+  diagnosticFont: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
+--- !u!114 &991423207
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 991423203}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4dea56a9eaadd1c439095de4f9a371cb, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Unity.XR.ARFoundation::UnityEngine.XR.ARFoundation.ARTrackedImageManager
+  <trackablesChanged>k__BackingField:
+    m_PersistentCalls:
+      m_Calls: []
+  m_SerializedLibrary: {fileID: 11400000, guid: a08c0cb13425a04409c8e193ca24cebc, type: 2}
+  m_MaxNumberOfMovingImages: 1
+  m_TrackedImagePrefab: {fileID: 0}
 --- !u!114 &1012477773
 MonoBehaviour:
   m_ObjectHideFlags: 0
